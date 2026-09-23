@@ -68,15 +68,17 @@ const PerceptionShader = {
         
         // 3. Dots (Stippling/Pointillism)
         if (uDots > 0.0) {
-            vec2 rotUV = vUv * uResolution / 6.0;
+            // Toned down for mobile: larger dots (divide by 12 instead of 6), softer background, lower contrast
+            vec2 rotUV = vUv * uResolution / 12.0;
             vec2 grid = floor(rotUV);
             vec2 local = fract(rotUV) - 0.5;
-            vec3 sampleColor = texture2D(tDiffuse, (grid + 0.5) * 6.0 / uResolution).rgb;
+            vec3 sampleColor = texture2D(tDiffuse, (grid + 0.5) * 12.0 / uResolution).rgb;
             float sLum = dot(sampleColor, vec3(0.299, 0.587, 0.114));
-            float radius = sLum * 0.75;
+            float radius = sLum * 0.85; // slightly fuller dots
             float inDot = step(length(local), radius);
-            vec3 dotColor = mix(vec3(0.0), sampleColor * 1.5, inDot);
-            col = mix(col, dotColor, uDots);
+            // Mix with a dark gray base color instead of pure black for less harshness
+            vec3 dotColor = mix(vec3(0.04), sampleColor * 1.15, inDot);
+            col = mix(col, dotColor, uDots * 0.8); // Cap the max intensity of the effect
         }
         
         // 4. Edge (Abstract / X-ray-ish)
@@ -689,6 +691,15 @@ function serviceGrounds() {
       g.created = true; 
       // 25% chance of real solid impact, 35% chance of extremely late opening, 40% chance of standard escape
       g.outcome = rnd() < 0.25 ? 'impact' : (rnd() < 0.55 ? 'late' : 'escape');
+      
+      const escalation = clamp(floorsEscaped / 8.0, 0, 1);
+      if (g.outcome === 'impact') {
+         g.triggerDist = -100; // never warp visually until hit
+      } else if (g.outcome === 'late') {
+         g.triggerDist = R(10, 25); // face entirely in it (0.15 to 0.4 seconds away at 60m/s)
+      } else {
+         g.triggerDist = R(45, 95) * (1 - 0.4 * escalation); // unpredictable closer escapes (0.75 to 1.5 seconds away)
+      }
     }
     if (g.created) {
       g.mesh.material.uniforms.uFade.value = smooth(22, 190, gd);
@@ -698,12 +709,7 @@ function serviceGrounds() {
       
       const escalation = clamp(floorsEscaped / 8.0, 0, 1);
       
-      let triggerDist;
-      if (g.outcome === 'impact') triggerDist = -100; // never warp visually until hit
-      else if (g.outcome === 'late') triggerDist = 90; // extremely late opening
-      else triggerDist = lerp(900, 250, escalation);
-      
-      let anticipation = smooth(triggerDist, -50, gd);
+      let anticipation = smooth(g.triggerDist, -50, gd);
       
       // If we are currently experiencing an impact state on this floor, blow it up
       if (impactState > 0 && g.impacted) {
@@ -778,79 +784,6 @@ function streamWorld() {
 }
 let densTarget = 1, dens = 1, arousal = 0.4;
 let timeToImpact = 999;
-
-// --- Perception Glitch System ---
-const glitchTypes = ['uDesat', 'uInvert', 'uDots', 'uThermal', 'uEdge'];
-let activeGlitches = [];
-let nextGlitchTime = 0;
-
-function updateGlitches(dt) {
-    let prob = 0.05 * dt; // Base probability of a glitch happening
-    if (timeToImpact < 3.0) prob += 0.4 * dt; 
-    if (torsoW > 2.0) prob += 0.2 * dt; 
-    
-    // Impact guarantees an immediate invert flash, bypassing the timer
-    if (impactState > 0 && activeGlitches.filter(g => g.type === 'uInvert').length === 0 && rnd() < 0.5) {
-        activeGlitches.push({ type: 'uInvert', duration: R(0.05, 0.2), fadeIn: 0.01, fadeOut: 0.1, intensity: 1.0, age: 0 });
-    }
-    
-    if (simT > nextGlitchTime && rnd() < prob) {
-        let type = pick(glitchTypes);
-        
-        let intensity = R(0.2, 1.0);
-        if (rnd() < 0.3) intensity *= 0.3; // 30% chance for a very subtle, almost unnoticeable effect
-        
-        let duration = R(0.5, 4.0);
-        let fadeIn = R(0.1, 1.0);
-        let fadeOut = R(0.1, 2.0);
-        
-        if (type === 'uInvert' && rnd() < 0.8) {
-            // Inverts are usually aggressive flashes
-            duration = R(0.05, 0.2);
-            fadeIn = 0.01;
-            fadeOut = 0.1;
-            intensity = 1.0;
-        }
-
-        activeGlitches.push({ type, duration, fadeIn, fadeOut, intensity, age: 0 });
-        nextGlitchTime = simT + R(1.0, 5.0); // Minimum cooldown between randomly spawning glitches
-    }
-    
-    let currentVals = { uDesat: 0, uInvert: 0, uDots: 0, uThermal: 0, uEdge: 0 };
-    
-    for (let i = activeGlitches.length - 1; i >= 0; i--) {
-        let g = activeGlitches[i];
-        g.age += dt;
-        
-        let totalLife = g.fadeIn + g.duration + g.fadeOut;
-        if (g.age >= totalLife) {
-            activeGlitches.splice(i, 1);
-            continue;
-        }
-        
-        let env = 1.0;
-        if (g.age < g.fadeIn) {
-            env = g.age / g.fadeIn;
-        } else if (g.age > g.fadeIn + g.duration) {
-            env = 1.0 - ((g.age - g.fadeIn - g.duration) / g.fadeOut);
-        }
-        
-        env = smooth(0, 1, env);
-        currentVals[g.type] = Math.max(currentVals[g.type], g.intensity * env);
-    }
-    
-    if (perceptionPasses.length > 0) {
-        for (const pass of perceptionPasses) {
-            pass.uniforms.uDesat.value = currentVals.uDesat;
-            pass.uniforms.uInvert.value = currentVals.uInvert;
-            pass.uniforms.uDots.value = currentVals.uDots;
-            pass.uniforms.uThermal.value = currentVals.uThermal;
-            pass.uniforms.uEdge.value = currentVals.uEdge;
-        }
-    }
-}
-// --------------------------------
-
 function updateEnv(dt) {
   const a = actAt(D), i = plan.indexOf(a), b = plan[i + 1];
   const bs = a.ground ? a.end - 780 : a.end - 70;
@@ -884,8 +817,23 @@ function updateEnv(dt) {
       const introRamp = smooth(0, 10, simT);
       arousal = clamp((0.38 + 0.62 * gApp) * introRamp, 0.05, 1);
       
-      // updateGlitches replaces the old direct coupling
-      updateGlitches(dt);
+      // Update perception filters based on physics state
+      if (perceptionPasses.length > 0) {
+        const uDesat = clamp((U - 50) / 30, 0, 1);                      // Color drains as velocity increases
+        const uDots = clamp((torsoW - 2.0) / 6.0, 0, 1);               // Smears/dots as rotation (tumbling) increases (toned down threshold)
+        const uThermal = clamp(1.0 - (timeToImpact - 0.2) / 1.5, 0, 1); // Thermal vision right before impact
+        const uInvert = clamp(impactState, 0.0, 1.0);                  // Brief inversion upon impact
+        const distanceSinceFloor = Math.max(0, D - passedFloorD);
+        const uEdge = clamp((distanceSinceFloor - 1500) / 1000, 0, 1); // Edge-only abstraction if falling forever
+        
+        for (const pass of perceptionPasses) {
+          pass.uniforms.uDesat.value += (uDesat - pass.uniforms.uDesat.value) * (1 - Math.exp(-dt * 3));
+          pass.uniforms.uDots.value += (uDots - pass.uniforms.uDots.value) * (1 - Math.exp(-dt * 5));
+          pass.uniforms.uThermal.value += (uThermal - pass.uniforms.uThermal.value) * (1 - Math.exp(-dt * 10));
+          pass.uniforms.uInvert.value += (uInvert - pass.uniforms.uInvert.value) * (1 - Math.exp(-dt * 20));
+          pass.uniforms.uEdge.value += (uEdge - pass.uniforms.uEdge.value) * (1 - Math.exp(-dt * 0.5));
+        }
+      }
     }
 
 /* ========================================================================= BODY */
